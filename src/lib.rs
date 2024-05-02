@@ -1,5 +1,6 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::AtomicUsize;
+use std::collections::HashMap;
 
 use tracing::Subscriber;
 use tracing::{
@@ -295,7 +296,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WASMLayer {
     // /// doc: Notifies this layer that a span with the ID span recorded that it follows from the span with the ID follows.
     // fn on_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id, ctx: Context<'_, S>) {}
     /// doc: Notifies this layer that an event has occurred.
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+    fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
         if self.config.report_logs_in_timings || self.config.report_logs_in_console {
             let mut recorder = StringRecorder::new();
             event.record(&mut recorder);
@@ -307,14 +308,31 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WASMLayer {
                     .and_then(|file| meta.line().map(|ln| format!("{}:{}", file, ln)))
                     .unwrap_or_default();
 
+                let fields = ctx
+                    .lookup_current()
+                    .and_then(|span| {
+                        span.extensions()
+                            .get::<StringRecorder>()
+                            .map(|span_recorder| {
+                                span_recorder
+                                    .fields
+                                    .iter()
+                                    .map(|(key, value)| format!("\n\t{key}: {value}"))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            })
+                    })
+                    .unwrap_or_default();
+
                 if self.config.use_console_color {
                     log4(
                         format!(
-                            "%c{}%c {}{}%c{}",
+                            "%c{}%c {}{}%c{}{}",
                             level,
                             origin,
                             thread_display_suffix(),
                             recorder,
+                            fields
                         ),
                         match *level {
                             tracing::Level::TRACE => "color: dodgerblue; background: #444",
@@ -328,11 +346,12 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for WASMLayer {
                     );
                 } else {
                     log1(format!(
-                        "{} {}{} {}",
+                        "{} {}{} {}{}",
                         level,
                         origin,
                         thread_display_suffix(),
                         recorder,
+                        fields
                     ));
                 }
             }
@@ -421,12 +440,14 @@ pub fn set_as_global_default_with_config(config: WASMLayerConfig) {
 struct StringRecorder {
     display: String,
     is_following_args: bool,
+    fields: HashMap<String, String>,
 }
 impl StringRecorder {
     fn new() -> Self {
         StringRecorder {
             display: String::new(),
             is_following_args: false,
+            fields: HashMap::default(),
         }
     }
 }
@@ -449,6 +470,8 @@ impl Visit for StringRecorder {
                 self.is_following_args = true;
             }
             write!(self.display, "{} = {:?};", field.name(), value).unwrap();
+            self.fields
+                .insert(field.name().to_owned(), format!("{:?}", value));
         }
     }
 }
